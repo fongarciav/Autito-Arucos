@@ -1,0 +1,46 @@
+#include <WiFi.h>
+#include <esp_now.h>
+
+// MAC del ESP-CAM receptor
+uint8_t macReceptor[] = {0xA0, 0xDD, 0x6C, 0xAD, 0xD9, 0xCC};
+
+void onEnvio(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("Estado de envío: ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Éxito" : "Fallo");
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("❌ Error al iniciar ESP-NOW");
+    return;
+  }
+
+  esp_now_register_send_cb(onEnvio);
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, macReceptor, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  if (!esp_now_add_peer(&peerInfo)) {
+    Serial.println("✅ Receptor agregado correctamente");
+  } else {
+    Serial.println("❌ Error al agregar receptor");
+  }
+}
+
+void loop() {
+  if (Serial.available()) {
+    String comando = Serial.readStringUntil('\n');
+    comando.trim();
+    if (comando.length() > 0) {
+      esp_now_send(macReceptor, (uint8_t *)comando.c_str(), comando.length());
+      Serial.print("📤 Enviado al receptor: ");
+      Serial.println(comando);
+    }
+  }
+}
