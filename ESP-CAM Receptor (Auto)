@@ -1,0 +1,121 @@
+#include <WiFi.h>
+#include <esp_now.h>
+
+// Pines del L298N
+const int IN1 = 12;
+const int IN2 = 13;
+const int IN3 = 14;
+const int IN4 = 15;
+const int ENA = 4;   // PWM para motor A
+const int ENB = 2;   // PWM para motor B
+
+int velocidadA = 100; // PWM del motor A
+int velocidadB = 100; // PWM del motor B
+
+void actualizarVelocidad(uint8_t valA, uint8_t valB) {
+  velocidadA = constrain(map(valA, 1, 9, 80, 255), 0, 255);
+  velocidadB = constrain(map(valB, 1, 9, 80, 255), 0, 255);
+  Serial.print("🌀 Velocidad PWM A/B: ");
+  Serial.print(velocidadA);
+  Serial.print("/");
+  Serial.println(velocidadB);
+}
+
+void detener() {
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+  ledcWrite(0, 0);
+  ledcWrite(1, 0);
+}
+
+void avanzar() {
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  ledcWrite(0, velocidadA);
+  ledcWrite(1, velocidadB);
+}
+
+void retroceder() {
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+  ledcWrite(0, velocidadA);
+  ledcWrite(1, velocidadB);
+}
+
+void izquierda() {
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  ledcWrite(0, velocidadA);
+  ledcWrite(1, velocidadB);
+}
+
+void derecha() {
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+  ledcWrite(0, velocidadA);
+  ledcWrite(1, velocidadB);
+}
+
+void code() {
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW); // motor A adelante
+  digitalWrite(IN3, LOW);  digitalWrite(IN4, LOW); // motor B apagado
+  ledcWrite(0, velocidadA);
+  ledcWrite(1, 0);
+}
+
+void coiz() {
+  digitalWrite(IN1, LOW);  digitalWrite(IN2, LOW); // motor A apagado
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW); // motor B adelante
+  ledcWrite(0, 0);
+  ledcWrite(1, velocidadB);
+}
+
+void onReceiveData(const uint8_t *mac, const uint8_t *data, int len) {
+  String comando = "";
+  for (int i = 0; i < len; i++) {
+    comando += (char)data[i];
+  }
+  comando.trim();
+  Serial.print("📩 Recibido: ");
+  Serial.println(comando);
+
+  if (comando == "AVANZAR") avanzar();
+  else if (comando == "RETROCEDER") retroceder();
+  else if (comando == "IZQUIERDA") izquierda();
+  else if (comando == "DERECHA") derecha();
+  else if (comando == "code") code();
+  else if (comando == "coiz") coiz();
+  else if (comando == "PARAR") detener();
+  else if (comando.length() == 2 && isDigit(comando[0]) && isDigit(comando[1])) {
+    actualizarVelocidad(comando[0] - '0', comando[1] - '0');
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+
+  ledcSetup(0, 1000, 8);
+  ledcSetup(1, 1000, 8);
+  ledcAttachPin(ENA, 0);
+  ledcAttachPin(ENB, 1);
+
+  detener();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("❌ Error al iniciar ESP-NOW");
+    return;
+  }
+
+  esp_now_register_recv_cb(onReceiveData);
+  Serial.println("✅ ESP-NOW receptor listo");
+}
+
+void loop() {
+  // Nada en loop
+}
