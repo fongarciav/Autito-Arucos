@@ -1,0 +1,187 @@
+import cv2
+import cv2.aruco as aruco
+import numpy as np
+import serial
+import time
+import threading
+
+# Inicializar comunicación serial con ESP32 emisor
+try:
+    ser = serial.Serial('COM7', 115200, timeout=1)
+    time.sleep(2)
+except Exception:
+    ser = None
+    print("\u26a0 No se pudo abrir el puerto COM7")
+
+# Inicializar cámara
+cap = cv2.VideoCapture(1)
+if not cap.isOpened():
+    print("\u26a0 No se pudo abrir la cámara")
+    exit()
+
+aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_4X4_100)
+parameters = aruco.DetectorParameters()
+corner_ids = [8, 9, 17, 47]
+
+mouse_pos = (0, 0)
+destino = None
+ultimo_comando = None
+velocidad_actual = '55'
+margen_angulo = 15  # en grados para considerar vectores paralelos
+linea_inicio = None
+ultimo_vector_t = 0
+
+cv2.namedWindow('Vista Aerea')
+estado = 'COMPLETO'
+sentido_mov = 'AVANZAR'
+
+def mouse_callback(event, x, y, flags, param):
+    global destino, mouse_pos, estado, linea_inicio, ultimo_vector_t
+    if event == cv2.EVENT_LBUTTONDOWN:
+        destino = (x, y)
+        estado = 'MOVER'
+        linea_inicio = None
+        ultimo_vector_t = 0
+    elif event == cv2.EVENT_MOUSEMOVE:
+        mouse_pos = (x, y)
+
+cv2.setMouseCallback('Vista Aerea', mouse_callback)
+
+def leer_terminal():
+    global velocidad_actual
+    while True:
+        entrada = input("Velocidad (11-99): ")
+        if len(entrada) == 2 and all(ch in '123456789' for ch in entrada):
+            if ser:
+                ser.write((entrada + '\n').encode())
+                print(f"\u2192 Velocidad enviada: {entrada}")
+                velocidad_actual = entrada
+
+threading.Thread(target=leer_terminal, daemon=True).start()
+
+def enviar_comando(cmd: str):
+    global ultimo_comando
+    if cmd != ultimo_comando:
+        if ser:
+            ser.write((cmd + "\n").encode())
+            print(f"\u2192 Enviado: {cmd}")
+        ultimo_comando = cmd
+
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        continue
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    detector = aruco.ArucoDetector(aruco_dict, parameters)
+    corners, ids, _ = detector.detectMarkers(gray)
+
+    warped = None
+    H = None
+    marker_corners = {}
+    if ids is not None:
+        aruco.drawDetectedMarkers(frame, corners, ids)
+        for i in range(len(ids)):
+            marker_corners[int(ids[i][0])] = corners[i][0]
+
+    if all(id in marker_corners for id in corner_ids):
+        src_pts = np.array([
+            marker_corners[8][0],
+            marker_corners[9][1],
+            marker_corners[47][2],
+            marker_corners[17][3]
+        ], dtype=np.float32)
+
+        margin = 60
+        dst_pts = np.array([
+            [0 - margin, 0 - margin],
+            [500 + margin, 0 - margin],
+            [500 + margin, 500 + margin],
+            [0 - margin, 500 + margin]
+        ], dtype=np.float32)
+
+        H, _ = cv2.findHomography(src_pts, dst_pts)
+        warped = cv2.warpPerspective(frame, H, (600, 600))
+
+    if warped is not None:
+        robot_pos = None
+        robot_theta = None
+        aruco_poly = None
+
+        if 2 in marker_corners:
+            pts = np.array([marker_corners[2]], dtype=np.float32)
+            transformed = cv2.perspectiveTransform(pts, H)[0]
+            robot_pos = tuple(transformed.mean(axis=0).astype(int))
+
+            p0, p1 = transformed[0], transformed[1]
+            robot_theta = np.degrees(np.arctan2(p1[1]-p0[1], p1[0]-p0[0]))
+
+            cv2.circle(warped, robot_pos, 6, (255, 0, 0), -1)
+
+            length = 40
+            dx_arrow = int(np.cos(np.radians(robot_theta)) * length)
+            dy_arrow = int(np.sin(np.radians(robot_theta)) * length)
+            arrow_tip = (robot_pos[0] + dx_arrow, robot_pos[1] + dy_arrow)
+            cv2.arrowedLine(warped, robot_pos, arrow_tip, (255, 0, 255), 2, tipLength=0.3)
+
+            aruco_poly = transformed.astype(int)
+
+        cv2.putText(warped, f"({mouse_pos[0]} mm, {mouse_pos[1]} mm)", (mouse_pos[0]+10, mouse_pos[1]-10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+        if destino and robot_pos is not None:
+            cv2.circle(warped, destino, 6, (0, 255, 255), -1)
+
+            if linea_inicio is None:
+                linea_inicio = robot_pos
+                ultimo_vector_t = time.time()
+            elif time.time() - ultimo_vector_t >= 2:
+                linea_inicio = robot_pos
+                ultimo_vector_t = time.time()
+
+            if aruco_poly is not None:
+                aruco_en_destino = cv2.pointPolygonTest(aruco_poly, destino, False) >= 0
+            else:
+                aruco_en_destino = False
+
+            if estado == 'MOVER':
+                if aruco_en_destino:
+                    enviar_comando('PARAR')
+                    estado = 'COMPLETO'
+                else:
+                    vec_dest = np.array([destino[0] - linea_inicio[0], destino[1] - linea_inicio[1]], dtype=float)
+                    norm_dest = np.linalg.norm(vec_dest)
+                    if norm_dest == 0:
+                        norm_dest = 1.0
+                    vec_dest_unit = vec_dest / norm_dest
+
+                    vec_arrow = np.array([np.cos(np.radians(robot_theta)), np.sin(np.radians(robot_theta))], dtype=float)
+
+                    arrow_tip = (int(linea_inicio[0] + vec_dest_unit[0] * 40), int(linea_inicio[1] + vec_dest_unit[1] * 40))
+                    cv2.arrowedLine(warped, linea_inicio, arrow_tip, (0, 255, 0), 1, tipLength=0.3)
+
+                    dot = np.dot(vec_arrow, vec_dest_unit)
+                    angle_diff = np.degrees(np.arccos(np.clip(dot, -1.0, 1.0)))
+                    cross = vec_arrow[0] * vec_dest_unit[1] - vec_arrow[1] * vec_dest_unit[0]
+
+                    if dot > 0 and angle_diff < margen_angulo:
+                        enviar_comando(sentido_mov)
+                    else:
+                        enviar_comando('code' if cross > 0 else 'coiz')
+
+            elif estado == 'COMPLETO':
+                pass
+
+        cv2.imshow('Vista Aerea', warped)
+
+    cv2.imshow('Camara Principal', frame)
+
+    if cv2.waitKey(10) & 0xFF == ord('q'):
+        enviar_comando('PARAR')
+        break
+
+cap.release()
+if ser:
+    ser.close()
+cv2.destroyAllWindows()
